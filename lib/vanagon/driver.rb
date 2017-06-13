@@ -94,7 +94,10 @@ class Vanagon
 
     # Returns the set difference between the build_requires and the components to get a list of external dependencies that need to be installed.
     def list_build_dependencies
-      @project.components.map(&:build_requires).flatten.uniq - @project.components.map(&:name)
+      @project.components.select do |component|
+        cache = "output/cache/#{@project.cache_file(component)}"
+        !(component.cacheable? && File.exists?(cache))
+      end.map(&:build_requires).flatten.uniq - @project.components.map(&:name)
     end
 
     def install_build_dependencies # rubocop:disable Metrics/AbcSize

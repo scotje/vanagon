@@ -2,6 +2,7 @@ require 'vanagon/component/dsl'
 require 'vanagon/component/rules'
 require 'vanagon/component/source'
 require 'vanagon/component/source/rewrite'
+require 'digest'
 
 class Vanagon
   class Component
@@ -106,6 +107,12 @@ class Vanagon
     # usually a String, but not required to be.
     attr_accessor :cleanup_source
 
+    # source_digest contains the SHA of the ruby file used to create this
+    # component.
+    attr_accessor :source_digest
+    attr_accessor :cacheable
+    attr_accessor :cache_file
+
     # Loads a given component from the configdir
     #
     # @param name [String] the name of the component
@@ -116,8 +123,11 @@ class Vanagon
     # @raise if the instance_eval on Component fails, the exception is reraised
     def self.load_component(name, configdir, settings, platform)
       compfile = File.join(configdir, "#{name}.rb")
+      source = File.read(compfile)
+      digest = Digest::SHA1.new.hexdigest source
       dsl = Vanagon::Component::DSL.new(name, settings, platform)
-      dsl.instance_eval(File.read(compfile), compfile, 1)
+      dsl.instance_eval(source, compfile, 1)
+      dsl._component.source_digest += digest
       dsl._component
     rescue => e
       $stderr.puts "Error loading project '#{name}' using '#{compfile}':"
@@ -155,6 +165,9 @@ class Vanagon
       @postinstall_actions = []
       @preremove_actions = []
       @postremove_actions = []
+      @source_digest = ''
+      @cache_file = nil
+      @cacheable = false
     end
 
     # Adds the given file to the list of files and returns @files.
@@ -293,6 +306,15 @@ class Vanagon
       { name => { 'version' => version, 'url' => url, 'ref' => options[:ref] }.delete_if { |_, v| !v } }
     end
 
+    def get_cache(workdir)
+      # TODO this is hardcoded to local cache files
+      src = Vanagon::Component::Source.source("file://#{@cache_file}", workdir: workdir)
+      src.fetch
+      src.verify
+      src.file = File.basename(src.url)
+      extract_with << src.extract(platform.tar) if src.respond_to? :extract
+    end
+
     # Fetches secondary sources for the component. These are just dumped into the workdir currently.
     #
     # @param workdir [String] working directory to put the source into
@@ -352,6 +374,22 @@ class Vanagon
 
     def rules(project, platform)
       Vanagon::Component::Rules.new(self, project, platform)
+    end
+
+    def cacheable?
+      @cacheable
+    end
+
+    def using_cache?
+      !@cache_file.nil?
+    end
+
+    def stagedir
+      if cacheable?
+        "$(workdir)/#{@name}.vanagon_stage"
+      else
+        raise "Cannot use stagedir unless caching is enabled"
+      end
     end
   end
 end

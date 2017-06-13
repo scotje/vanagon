@@ -100,7 +100,10 @@ class Vanagon
       # @raise [RuntimeError] exceptions are raised if there is no file, if it refers to methods that don't exist, or if it does not contain a Hash
       def load_from_json(file)
         if File.exists?(file)
-          data = JSON.parse(File.read(file))
+          source = File.read(file)
+          digest = Digest::SHA1.new.hexdigest source
+          @component.source_digest += digest
+          data = JSON.parse(source)
           raise "Hash required. Got '#{data.class}' when parsing '#{file}'" unless data.is_a?(Hash)
           data.each do |key, value|
             if self.respond_to?(key)
@@ -227,8 +230,9 @@ class Vanagon
       # @param owner  [String] owner of the file
       # @param group  [String] group owner of the file
       def install_file(source, target, mode: nil, owner: nil, group: nil) # rubocop:disable Metrics/AbcSize
-        @component.install << "#{@component.platform.install} -d '#{File.dirname(target)}'"
-        @component.install << "#{@component.platform.copy} -p '#{source}' '#{target}'"
+        staging = @component.cacheable? ? stagedir : ''
+        @component.install << %(#{@component.platform.install} -d "#{staging}#{File.dirname(target)}")
+        @component.install << %(#{@component.platform.copy} -p '#{source}' "#{staging}#{target}")
 
         if @component.platform.is_windows?
           unless mode.nil? && owner.nil? && group.nil?
@@ -236,7 +240,7 @@ class Vanagon
           end
         else
           mode ||= '0644'
-          @component.install << "chmod #{mode} '#{target}'"
+          @component.install << %(chmod #{mode} "#{staging}#{target}")
         end
         @component.add_file Vanagon::Common::Pathname.file(target, mode: mode, owner: owner, group: group)
       end
@@ -249,7 +253,8 @@ class Vanagon
         # I AM SO SORRY
         @component.delete_file file
         if @component.platform.name =~ /solaris-10|osx/
-          @component.install << "mv '#{file}' '#{file}.pristine'"
+          staging = @component.cacheable? ? stagedir : ''
+          @component.install << %(mv '#{file}' "#{staging}#{file}.pristine")
           @component.add_file Vanagon::Common::Pathname.configfile("#{file}.pristine", mode: mode, owner: owner, group: group)
         else
           @component.add_file Vanagon::Common::Pathname.configfile(file, mode: mode, owner: owner, group: group)
@@ -270,11 +275,12 @@ class Vanagon
       # @param source [String] path to the file to symlink
       # @param target [String] path to the desired symlink
       def link(source, target)
-        @component.install << "#{@component.platform.install} -d '#{File.dirname(target)}'"
+        staging = @component.cacheable? ? stagedir : ''
+        @component.install << %(#{@component.platform.install} -d "#{staging}#{File.dirname(target)}")
         # Use a bash conditional to only create the link if it doesn't already point to the correct source.
         # This allows rerunning the install step to be idempotent, rather than failing because the link
         # already exists.
-        @component.install << "([[ '#{target}' -ef '#{source}' ]] || ln -s '#{source}' '#{target}')"
+        @component.install << %(([[ "#{staging}#{target}" -ef '#{source}' ]] || ln -s '#{source}' "#{staging}#{target}"))
         @component.add_file Vanagon::Common::Pathname.file(target)
       end
 
@@ -387,7 +393,8 @@ class Vanagon
         else
           install_flags << "-m '#{mode}'" unless mode.nil?
         end
-        @component.install << "#{@component.platform.install} #{install_flags.join(' ')} '#{dir}'"
+        staging = @component.cacheable? ? stagedir : ''
+        @component.install << %(#{@component.platform.install} #{install_flags.join(' ')} "#{staging}#{dir}")
         @component.directories << Vanagon::Common::Pathname.new(dir, mode: mode, owner: owner, group: group)
       end
 
@@ -478,6 +485,18 @@ class Vanagon
 
       def license(license)
         @component.license = license
+      end
+
+      def enable_caching
+        if @component.install.empty?
+          @component.cacheable = true
+        else
+          raise "Cannot enable caching if there are already installed files"
+        end
+      end
+
+      def stagedir
+        @component.stagedir
       end
     end
   end

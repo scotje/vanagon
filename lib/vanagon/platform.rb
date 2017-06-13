@@ -1,5 +1,6 @@
 require 'vanagon/environment'
 require 'vanagon/platform/dsl'
+require 'digest'
 
 class Vanagon
   class Platform
@@ -116,6 +117,10 @@ class Vanagon
     # Freeform Hash of leftover settings
     attr_accessor :settings
 
+    # source_digest contains the SHA of the ruby file used to create this
+    # component.
+    attr_accessor :source_digest
+
     # Platform names currently contain some information about the platform. Fields
     # within the name are delimited by the '-' character, and this regex can be used to
     # extract those fields.
@@ -129,8 +134,11 @@ class Vanagon
     # @raise if the instance_eval on Platform fails, the exception is reraised
     def self.load_platform(name, configdir)
       platfile = File.join(configdir, "#{name}.rb")
+      source = File.read(platfile)
+      digest = Digest::SHA1.new.hexdigest source
       dsl = Vanagon::Platform::DSL.new(name)
-      dsl.instance_eval(File.read(platfile), platfile, 1)
+      dsl.instance_eval(source, platfile, 1)
+      dsl._platform.source_digest = digest
       dsl._platform
     rescue => e
       $stderr.puts "Error loading platform '#{name}' using '#{platfile}':"
@@ -218,6 +226,8 @@ class Vanagon
 
       # Our first attempt at defining metadata about a platform
       @cross_compiled ||= false
+
+      @source_digest ||= ''
     end
 
     def shell

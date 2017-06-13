@@ -4,6 +4,7 @@ require 'vanagon/platform'
 require 'vanagon/project/dsl'
 require 'vanagon/utilities'
 require 'ostruct'
+require 'digest'
 
 class Vanagon
   class Project
@@ -83,6 +84,11 @@ class Vanagon
     # Should we include source packages?
     attr_accessor :source_artifacts
 
+    # source_digest contains the SHA of the ruby file used to create this
+    # component.
+    attr_accessor :source_digest
+
+
     # Loads a given project from the configdir
     #
     # @param name [String] the name of the project
@@ -93,8 +99,11 @@ class Vanagon
     # @raise if the instance_eval on Project fails, the exception is reraised
     def self.load_project(name, configdir, platform, include_components = [])
       projfile = File.join(configdir, "#{name}.rb")
+      source = File.read(projfile)
+      digest = Digest::SHA1.new.hexdigest source
       dsl = Vanagon::Project::DSL.new(name, platform, include_components)
-      dsl.instance_eval(File.read(projfile), projfile, 1)
+      dsl.instance_eval(source, projfile, 1)
+      dsl._project.source_digest = digest
       dsl._project
     rescue => e
       $stderr.puts "Error loading project '#{name}' using '#{projfile}':"
@@ -125,6 +134,7 @@ class Vanagon
       @conflicts = []
       @package_overrides = []
       @source_artifacts = false
+      @source_digest = ''
     end
 
     # Magic getter to retrieve settings in the project
@@ -155,9 +165,17 @@ class Vanagon
     # @param workdir [String] directory to stage sources into
     def fetch_sources(workdir)
       @components.each do |component|
-        component.get_source(workdir)
-        # Fetch secondary sources
-        component.get_sources(workdir)
+        # TODO fix this hardcoded cache dir
+        cache = "output/cache/#{cache_file(component)}"
+        if component.cacheable? && File.exists?(cache)
+          component.cache_file = cache
+          component.get_cache(workdir)
+        else
+          component.get_source(workdir)
+          # Fetch secondary sources
+          component.get_sources(workdir)
+        end
+        # Always fetch patches, in case they are post-install
         component.get_patches(workdir)
       end
     end
@@ -512,6 +530,24 @@ class Vanagon
       manifest = build_manifest_json
       File.open(File.join('ext', 'build_metadata.json'), 'w') do |f|
         f.write(JSON.pretty_generate(manifest))
+      end
+    end
+
+    def component_id(component)
+      deps = @components
+             .select { |c| component.build_requires.include?(c.name) }
+             .map { |c| component_id(c) }
+             .join("")
+      id = @platform.source_digest + @source_digest + component.source_digest + deps
+      Digest::SHA1.new.hexdigest id
+    end
+
+    def cache_file(component)
+      "#{component.name}-#{component_id(component)}.tar.gz"
+    end
+
+    def load_cache()
+      @components.each do |c|
       end
     end
   end

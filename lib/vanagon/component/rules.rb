@@ -50,17 +50,26 @@ class Vanagon
       def rules
         list = [
           component_rule,
-          unpack_rule,
-          patch_rule,
-          configure_rule,
-          build_rule,
-          check_rule,
           install_rule,
           clean_rule,
           clobber_rule,
         ]
         if project.cleanup
           list << cleanup_rule
+        end
+
+        if !component.using_cache?
+          list.concat [
+            unpack_rule,
+            patch_rule,
+            configure_rule,
+            build_rule,
+            check_rule,
+          ]
+
+          if component.cacheable?
+            list << cache_rule
+          end
         end
 
         list
@@ -82,6 +91,9 @@ class Vanagon
       rule("unpack") do |r|
         r.dependencies = ['file-list-before-build']
         r.recipe << andand_multiline(component.environment_variables, component.extract_with)
+        if component.cacheable?
+          r.recipe << "mkdir -p \"#{component.stagedir}\""
+        end
         r.recipe << "touch #{r.target}"
       end
 
@@ -146,15 +158,40 @@ class Vanagon
         r.recipe << "touch #{r.target}"
       end
 
-      # Install this component.
-      rule("install") do |r|
-        r.dependencies = ["#{component.name}-check"]
-        unless component.install.empty?
+      def cache_rule
+        Makefile::Rule.new("#{@project.cache_file(component)}") do |r|
+          r.dependencies = ["#{component.name}-check"]
           r.recipe << andand_multiline(
             component.environment_variables,
             "cd #{component.get_build_dir}",
-            component.install
+            component.install,
+            "cd #{component.stagedir}",
+            %(tar czpf "$(workdir)/#{r.target}" *)
           )
+        end
+      end
+
+      # Install this component.
+      rule("install") do |r|
+        if component.cacheable?
+          cache_file = @project.cache_file(component)
+          # When we're using a cached file, we want to be sure our
+          # deps unpack before us
+          r.dependencies = [cache_file].concat(project.list_component_dependencies(component))
+          r.recipe << "tar xzpf #{cache_file} -C /"
+          if !component.using_cache?
+            r.recipe << "mkdir -p output/cache"
+            r.recipe << "mv #{cache_file} output/cache"
+          end
+        else
+          r.dependencies = ["#{component.name}-check"]
+          unless component.install.empty?
+            r.recipe << andand_multiline(
+              component.environment_variables,
+              "cd #{component.get_build_dir}",
+              component.install
+            )
+          end
         end
 
         after_install_patches = component.patches.select { |patch| patch.after == "install" }
@@ -174,7 +211,9 @@ class Vanagon
       # the `cleanup` attribute set.
       rule("cleanup") do |r|
         r.dependencies = ["#{component.name}-install"]
-        r.recipe = [component.cleanup_source, "touch #{r.target}"]
+        if !component.using_cache?
+          r.recipe = [component.cleanup_source, "touch #{r.target}"]
+        end
       end
 
       # Clean up any files generated while building this project.
@@ -182,11 +221,12 @@ class Vanagon
       # This cleans up the project by invoking `make clean` and removing the touch files
       # for the configure/build/install steps.
       rule("clean") do |r|
-        r.recipe << andand(
-          "[ -d #{component.get_build_dir} ]",
-          "cd #{component.get_build_dir}",
-          "#{platform[:make]} clean"
-        )
+        if !component.using_cache?
+          r.recipe << andand(
+            "[ -d #{component.get_build_dir} ]",
+            "cd #{component.get_build_dir}",
+            "#{platform[:make]} clean"
+          )
 
         %w[configure build install].each do |type|
           touchfile = "#{component.name}-#{type}"
@@ -195,15 +235,22 @@ class Vanagon
             "rm #{touchfile}"
           )
         end
+
+          if component.cacheable?
+            r.recipe << "rm #{@project.cache_file(component)}"
+          end
+        end
       end
 
       # Remove all files associated with this component.
       rule("clobber") do |r|
-        r.dependencies = ["#{component.name}-clean"]
-        r.recipe = [
-          andand("[ -d #{component.dirname} ]", "rm -r #{component.dirname}"),
-          andand("[ -e #{component.name}-unpack ]", "rm #{component.name}-unpack")
-        ]
+        if !component.using_cache?
+          r.dependencies = ["#{component.name}-clean"]
+          r.recipe = [
+            andand("[ -d #{component.dirname} ]", "rm -r #{component.dirname}"),
+            andand("[ -e #{component.name}-unpack ]", "rm #{component.name}-unpack")
+          ]
+        end
       end
 
       # Generate a Makefile fragment that contains all of the rules for the component.
